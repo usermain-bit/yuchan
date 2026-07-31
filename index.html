@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pinch Canvas - 스마트 에어 그림판</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #f8f9fa;
+            font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+            user-select: none;
+        }
+        
+        .input_video {
+            display: none;
+        }
+        
+        .canvas-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        #drawingCanvas { z-index: 1; }
+        #uiCanvas { z-index: 10; pointer-events: none; }
+
+        #toolbar {
+            position: absolute;
+            top: 50%;
+            left: 120px;
+            transform: translateY(-50%);
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            padding: 20px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            z-index: 5;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            width: 75px;
+            pointer-events: auto;
+        }
+
+        .tool-btn, .color-btn, #clearBtn {
+            width: 100%;
+            aspect-ratio: 1;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+
+        .tool-btn { 
+            background: #ffffff; 
+            color: #495057; 
+            border: 2px solid transparent;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+        
+        .tool-btn.active { 
+            background: #212529; 
+            color: #ffffff; 
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(33, 37, 41, 0.3);
+        }
+        
+        .color-btn { 
+            border: 3px solid transparent; 
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+        
+        .color-btn.active { 
+            border-color: #212529; 
+            transform: scale(1.15); 
+        }
+        
+        .red { background-color: #ff6b6b; }
+        .blue { background-color: #4dabf7; }
+        .black { background-color: #343a40; }
+        .green { background-color: #51cf66; }
+
+        .divider {
+            height: 2px;
+            background: rgba(0, 0, 0, 0.08);
+            margin: 8px 0;
+            border-radius: 2px;
+        }
+
+        #clearBtn {
+            background: #fa5252;
+            color: white;
+            aspect-ratio: auto;
+            padding: 15px 0;
+            margin-top: 10px;
+            border: none;
+            box-shadow: 0 4px 12px rgba(250, 82, 82, 0.3);
+        }
+    </style>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <video class="input_video"></video>
+    <div class="canvas-container">
+        <canvas id="drawingCanvas"></canvas>
+        <canvas id="uiCanvas"></canvas>
+    </div>
+
+    <div id="toolbar">
+        <div class="tool-btn active" id="tool-pencil" data-tool="pencil">연필</div>
+        <div class="tool-btn" id="tool-brush" data-tool="brush">붓</div>
+        <div class="tool-btn" id="tool-eraser" data-tool="eraser">지우개</div>
+        
+        <div class="divider"></div>
+        
+        <div class="color-btn black active" data-color="#343a40"></div>
+        <div class="color-btn red" data-color="#ff6b6b"></div>
+        <div class="color-btn blue" data-color="#4dabf7"></div>
+        <div class="color-btn green" data-color="#51cf66"></div>
+
+        <div id="clearBtn">전체<br>지움</div>
+    </div>
+
+    <script>
+        const videoElement = document.querySelector('.input_video');
+        const drawingCanvas = document.getElementById('drawingCanvas');
+        const drawingCtx = drawingCanvas.getContext('2d', { willReadFrequently: true });
+        const uiCanvas = document.getElementById('uiCanvas');
+        const uiCtx = uiCanvas.getContext('2d');
+
+        function resizeCanvas() {
+            drawingCanvas.width = window.innerWidth;
+            drawingCanvas.height = window.innerHeight;
+            uiCanvas.width = window.innerWidth;
+            uiCanvas.height = window.innerHeight;
+            
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCanvas.width = drawingCanvas.width;
+            tempCanvas.height = drawingCanvas.height;
+            tempCtx.drawImage(drawingCanvas, 0, 0);
+            
+            drawingCtx.fillStyle = "#ffffff";
+            drawingCtx.fillRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+            drawingCtx.drawImage(tempCanvas, 0, 0);
+        }
+        window.addEventListener('resize', resizeCanvas);
+        
+        drawingCtx.fillStyle = "#ffffff";
+        drawingCtx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+        resizeCanvas();
+
+        let currentTool = 'pencil';
+        let currentColor = '#343a40';
+        let isDrawing = false;
+        let points = []; 
+        let actionState = 'idle'; 
+
+        // ★ 양손 모두 꼬집기 간격을 넉넉하게 넓혀 인식률 대폭 향상 (0.09)
+        const PINCH_THRESHOLD = 0.09;
+
+        let smoothLeftX = null, smoothLeftY = null;
+        let smoothRightX = null, smoothRightY = null;
+        const SMOOTH_FACTOR_LEFT = 0.7;   // 왼손: 빠른 반응 속도
+        const SMOOTH_FACTOR_RIGHT = 0.2;  // 오른손: 강력한 흔들림 보정
+
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        let lastActionTime = 0;
+        function checkToolbarInteraction(x, y) {
+            const now = Date.now();
+            if (now - lastActionTime < 250) return;
+
+            const elements = document.elementsFromPoint(x, y);
+            for (let el of elements) {
+                if (el.classList.contains('tool-btn')) {
+                    document.querySelectorAll('.tool-btn').forEach(btn => btn.classList.remove('active'));
+                    el.classList.add('active');
+                    currentTool = el.dataset.tool;
+                    lastActionTime = now;
+                    break;
+                }
+                if (el.classList.contains('color-btn')) {
+                    document.querySelectorAll('.color-btn').forEach(btn => btn.classList.remove('active'));
+                    el.classList.add('active');
+                    currentColor = el.dataset.color;
+                    lastActionTime = now;
+                    break;
+                }
+                if (el.id === 'clearBtn') {
+                    drawingCtx.fillStyle = "#ffffff";
+                    drawingCtx.fillRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+                    lastActionTime = now;
+                    break;
+                }
+            }
+        }
+
+        function drawSmoothLine(ctx) {
+            if (points.length < 3) return;
+
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+
+            for (let i = 1; i < points.length - 2; i++) {
+                const xc = (points[i].x + points[i + 1].x) / 2;
+                const yc = (points[i].y + points[i + 1].y) / 2;
+                ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+            }
+            
+            ctx.quadraticCurveTo(
+                points[points.length - 2].x, 
+                points[points.length - 2].y, 
+                points[points.length - 1].x, 
+                points[points.length - 1].y
+            );
+
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            if (currentTool === 'eraser') {
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 50;
+                ctx.shadowBlur = 0;
+            } else if (currentTool === 'brush') {
+                ctx.strokeStyle = currentColor;
+                ctx.lineWidth = 18;
+                ctx.shadowBlur = 12;
+                ctx.shadowColor = currentColor;
+            } else {
+                ctx.strokeStyle = currentColor;
+                ctx.lineWidth = 6;
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.stroke();
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 0,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480 
+        });
+        camera.start();
+
+        function onResults(results) {
+            uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+
+            let isLeftPinching = false;
+            let isRightPinching = false;
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                let leftHandData = null;
+                let rightHandData = null;
+
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    if (results.multiHandedness[i].label === 'Right') {
+                        leftHandData = results.multiHandLandmarks[i]; 
+                    } else {
+                        rightHandData = results.multiHandLandmarks[i]; 
+                    }
+                }
+
+                // 1. 왼손 로직 (꼬집기로 툴바 선택, 빠른 속도 반영)
+                if (leftHandData) {
+                    const indexTip = leftHandData[8];
+                    const thumbTip = leftHandData[4];
+                    
+                    const targetX = (1 - indexTip.x) * uiCanvas.width;
+                    const targetY = indexTip.y * uiCanvas.height;
+                    
+                    if (smoothLeftX === null) {
+                        smoothLeftX = targetX;
+                        smoothLeftY = targetY;
+                    } else {
+                        smoothLeftX += (targetX - smoothLeftX) * SMOOTH_FACTOR_LEFT;
+                        smoothLeftY += (targetY - smoothLeftY) * SMOOTH_FACTOR_LEFT;
+                    }
+
+                    isLeftPinching = getDistance(indexTip, thumbTip) < PINCH_THRESHOLD;
+
+                    uiCtx.beginPath();
+                    uiCtx.arc(smoothLeftX, smoothLeftY, isLeftPinching ? 16 : 10, 0, 2 * Math.PI);
+                    uiCtx.fillStyle = isLeftPinching ? "rgba(255, 154, 60, 0.9)" : "rgba(77, 171, 247, 0.7)";
+                    uiCtx.fill();
+
+                    if (isLeftPinching && actionState !== 'right_active') {
+                        actionState = 'left_active';
+                        checkToolbarInteraction(smoothLeftX, smoothLeftY);
+                    }
+                } else {
+                    smoothLeftX = null;
+                    smoothLeftY = null;
+                }
+
+                // 2. 오른손 로직 (꼬집기로 그리기, 강력한 흔들림 보정 반영)
+                if (rightHandData) {
+                    const indexTip = rightHandData[8];
+                    const thumbTip = rightHandData[4];
+                    
+                    const targetX = (1 - indexTip.x) * drawingCanvas.width; 
+                    const targetY = indexTip.y * drawingCanvas.height;
+                    
+                    if (smoothRightX === null) {
+                        smoothRightX = targetX;
+                        smoothRightY = targetY;
+                    } else {
+                        smoothRightX += (targetX - smoothRightX) * SMOOTH_FACTOR_RIGHT;
+                        smoothRightY += (targetY - smoothRightY) * SMOOTH_FACTOR_RIGHT;
+                    }
+
+                    isRightPinching = getDistance(indexTip, thumbTip) < PINCH_THRESHOLD;
+
+                    uiCtx.beginPath();
+                    uiCtx.arc(smoothRightX, smoothRightY, isRightPinching ? 6 : 10, 0, 2 * Math.PI);
+                    uiCtx.fillStyle = currentTool === 'eraser' ? "#ffffff" : currentColor;
+                    uiCtx.strokeStyle = currentTool === 'eraser' ? "#adb5bd" : "rgba(0,0,0,0.5)";
+                    uiCtx.lineWidth = 2;
+                    uiCtx.fill();
+                    uiCtx.stroke();
+
+                    if (isRightPinching && actionState !== 'left_active') {
+                        actionState = 'right_active';
+                        points.push({x: smoothRightX, y: smoothRightY});
+                        
+                        if (!isDrawing) {
+                            isDrawing = true;
+                        } else {
+                            drawSmoothLine(drawingCtx);
+                        }
+                    } else {
+                        isDrawing = false;
+                        points = [];
+                    }
+                } else {
+                    isDrawing = false;
+                    points = [];
+                    smoothRightX = null;
+                    smoothRightY = null;
+                }
+                
+                if (!isLeftPinching && !isRightPinching) {
+                    actionState = 'idle';
+                }
+
+            } else {
+                isDrawing = false;
+                points = [];
+                actionState = 'idle';
+                smoothLeftX = null; smoothLeftY = null;
+                smoothRightX = null; smoothRightY = null;
+            }
+        }
+    </script>
+</body>
+</html>
